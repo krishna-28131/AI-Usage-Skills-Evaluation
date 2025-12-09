@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>AI Time Tracker — Dashboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body class="bg-slate-50 min-h-screen font-sans">
+  <main class="max-w-6xl mx-auto p-6">
+    <header class="flex items-center justify-between py-6">
+      <h1 class="text-2xl font-bold">Daily Analytics</h1>
+      <div id="auth-area"></div>
+    </header>
+
+    <section id="content" class="bg-white rounded-2xl shadow p-6">
+      <div class="flex items-center gap-4">
+        <label>Pick date</label>
+        <input id="date-picker" type="date" class="rounded border p-2" />
+        <button id="btn-back" class="ml-auto px-3 py-2 rounded border">Back</button>
+      </div>
+
+      <div id="no-data" class="mt-8 hidden text-center">
+        <img src="assets/illustration-no-data.svg" alt="no data" class="mx-auto w-56" />
+        <h3 class="text-lg font-semibold mt-4">No data available for this date</h3>
+        <p class="mt-2 text-slate-600">Start logging your day to see an analysis.</p>
+        <div class="mt-4">
+          <a id="go-to-logger" href="index.html" class="px-4 py-2 rounded bg-indigo-600 text-white">Start logging</a>
+        </div>
+      </div>
+
+      <div id="dashboard" class="mt-6 hidden">
+        <div class="grid md:grid-cols-3 gap-6">
+          <div class="p-4 rounded-lg bg-slate-50">
+            <h4 class="text-sm text-slate-600">Total hours</h4>
+            <p id="total-hours" class="text-2xl font-semibold mt-2">0h</p>
+            <p id="num-activities" class="text-sm text-slate-500 mt-1">0 activities</p>
+          </div>
+
+          <div class="md:col-span-2 p-4 rounded-lg bg-slate-50">
+            <canvas id="pieChart"></canvas>
+          </div>
+        </div>
+
+        <div class="mt-6 p-4 rounded-lg bg-white shadow">
+          <h4 class="font-semibold mb-4">Timeline</h4>
+          <div id="timeline" class="space-y-2">
+            <!-- timeline items -->
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
+
+  <script src="js/firebase-config.js"></script>
+  <script>
+    // Minimal dashboard JS (keeps code small). We'll fetch activities for selected date and draw chart.
+    // This script expects the same Firestore structure: users/{uid}/days/{YYYY-MM-DD}/activities (docs)
+    const auth = firebase.auth();
+    const db = firebase.firestore();
+
+    const authArea = document.getElementById('auth-area');
+    function renderAuthArea(user) {
+      authArea.innerHTML = '';
+      if (!user) {
+        const a = document.createElement('a');
+        a.href = 'index.html';
+        a.className = 'px-3 py-2 rounded border';
+        a.textContent = 'Login';
+        authArea.appendChild(a);
+      } else {
+        const btn = document.createElement('button');
+        btn.className = 'px-3 py-2 rounded border';
+        btn.textContent = 'Sign out';
+        btn.onclick = () => auth.signOut();
+        authArea.appendChild(btn);
+      }
+    }
+
+    auth.onAuthStateChanged(u => {
+      renderAuthArea(u);
+      if (!u) {
+        // keep user on page (they can still view but encouraged to login)
+      }
+    });
+
+    const dateInput = document.getElementById('date-picker');
+    const noData = document.getElementById('no-data');
+    const dash = document.getElementById('dashboard');
+    const totalHoursEl = document.getElementById('total-hours');
+    const numActivitiesEl = document.getElementById('num-activities');
+    const timelineEl = document.getElementById('timeline');
+    const pieCtx = document.getElementById('pieChart').getContext('2d');
+
+    let pieChart = null;
+
+    function isoDate(d) {
+      return d.toISOString().slice(0,10);
+    }
+    // default to today
+    dateInput.value = isoDate(new Date());
+
+    document.getElementById('btn-back').addEventListener('click', ()=> location.href='index.html');
+
+    async function loadForDate(dateStr) {
+      const user = auth.currentUser;
+      if (!user) {
+        noData.classList.add('hidden');
+        dash.classList.add('hidden');
+        // prompt login by showing no-data message with CTA
+      }
+
+      const dayRef = db.collection('users').doc(user.uid).collection('days').doc(dateStr);
+      const snap = await dayRef.collection('activities').get();
+      if (snap.empty) {
+        noData.classList.remove('hidden');
+        dash.classList.add('hidden');
+        return;
+      }
+      // build aggregated data
+      const activities = [];
+      snap.forEach(doc => {
+        activities.push({ id: doc.id, ...doc.data() });
+      });
+
+      // totals
+      let total = 0;
+      const byCat = {};
+      activities.forEach(a => {
+        total += a.duration;
+        const c = (a.category || 'Other');
+        byCat[c] = (byCat[c] || 0) + a.duration;
+      });
+
+      totalHoursEl.textContent = (total/60).toFixed(2) + 'h';
+      numActivitiesEl.textContent = activities.length + ' activities';
+      // pie chart
+      const labels = Object.keys(byCat);
+      const values = labels.map(l => byCat[l]);
+
+      if (pieChart) pieChart.destroy();
+      pieChart = new Chart(pieCtx, {
+        type: 'pie',
+        data: { labels, datasets: [{ data: values }] },
+        options: {}
+      });
+
+      // timeline simple: sort by createdAt if present
+      timelineEl.innerHTML = '';
+      activities.sort((a,b)=> (a.createdAt?.seconds||0) - (b.createdAt?.seconds||0));
+      let cursor = 0;
+      activities.forEach(a => {
+        const startMin = cursor;
+        const endMin = cursor + a.duration;
+        cursor = endMin;
+        const el = document.createElement('div');
+        el.className = 'p-2 border rounded-md flex justify-between items-center';
+        el.innerHTML = `<div>
+                          <div class="font-medium">${a.title}</div>
+                          <div class="text-sm text-slate-500">${a.category || 'Other'}</div>
+                        </div>
+                        <div class="text-sm text-slate-600">${a.duration}m</div>`;
+        timelineEl.appendChild(el);
+      });
+
+      dash.classList.remove('hidden');
+      noData.classList.add('hidden');
+    }
+
+    async function init() {
+      const user = await new Promise(resolve => {
+        const unsub = auth.onAuthStateChanged(u => {
+          unsub();
+          resolve(u);
+        });
+      });
+      if (!user) {
+        // nothing
+      }
+      await loadForDate(dateInput.value);
+    }
+
+    dateInput.addEventListener('change', ()=> {
+      const v = dateInput.value;
+      if (!v) return;
+      loadForDate(v);
+    });
+
+    init();
+  </script>
+</body>
+</html>
